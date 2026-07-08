@@ -3,6 +3,8 @@
 用 Roslyn `AdhocWorkspace` 對 Unity 專案提供**語意級、跨組件**的 C# code intelligence——find references、go-to-definition、hover、callers、型別階層、符號搜尋——不跑 MSBuild、不需 Unity Editor、不需 LSP client。
 架構 = 常駐 server（建模一次、常駐記憶體）+ 輕量 client / curl（毫秒級查詢）。
 
+skills可以直接給AI使用
+
 > **使用方式（查詢端點、參數、curl 範例、輸出格式、刷新流程、跨組件去重）的完整說明在 [`SKILL.md`](./SKILL.md)** —— 那是單一事實來源，agent 也讀那份。本 README 只談安裝／建置／維運。
 
 ## 功能總覽
