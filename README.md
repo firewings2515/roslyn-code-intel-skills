@@ -7,6 +7,28 @@ skills可以直接給AI使用
 
 > **使用方式（查詢端點、參數、curl 範例、輸出格式、刷新流程、跨組件去重）的完整說明在 [`SKILL.md`](./SKILL.md)** —— 那是單一事實來源，agent 也讀那份。本 README 只談安裝／建置／維運。
 
+## 快速安裝（從原始碼編譯）
+本 repo 只含原始碼、不含編譯產物，首次使用需 build 一次（編譯本身 ~1 秒；僅首次需網路下載 NuGet 套件）：
+
+```powershell
+# 0) 需求：.NET SDK 9.x（dotnet --version 應顯示 9.x）
+# 1) 編譯（產物：src\bin\Release\net9.0\roslyn-findrefs.exe，scripts 會自動找到它）
+cd src
+dotnet build -c Release
+cd ..
+
+# 2) 設定要分析的專案：編輯 config.json，root 填 Unity 專案根目錄
+#    （該專案需已由 Unity 產生 *.csproj 且編譯過一次；csproj/root 擇一即可）
+
+# 3) 啟動常駐 server（開在新視窗顯示建模進度，印出 model READY 後即可查詢）
+scripts\start.cmd
+
+# 4) 驗證
+curl.exe -s "http://127.0.0.1:8123/health"     # {"ready":true,...} 即完成
+```
+
+之後若改了 `src/*.cs`，用 `scripts\rebuild.cmd` 一鍵「停止 → 編譯 → 重啟」。完整前置條件見下方「環境需求」。
+
 ## 功能總覽
 - **參照與導航**：`/findrefs`（所有語意引用，去重、跨組件）、`/definition`、`/hover`、`/callers`
 - **型別關係**：`/implementations`、`/overrides`、`/derived`、`/hierarchy`
