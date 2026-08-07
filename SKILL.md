@@ -46,6 +46,7 @@ curl -s "http://127.0.0.1:8123/health"          # port = config.json
 ```bash
 scripts/start.cmd
 ```
+Missing/incomplete build output (no exe or no `roslyn-findrefs.runtimeconfig.json`) is handled automatically — start runs `dotnet build -c Release` first (needs .NET SDK). Every start writes a step log to `logs/start-*.log`; on failure the last line names the failing step.
 If you shouldn't launch long-running processes, ask the user to run `scripts/start.cmd`.
 
 ## Core workflow (IMPORTANT)

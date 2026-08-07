@@ -13,6 +13,7 @@ skills可以直接給AI使用
 ```powershell
 # 0) 需求：.NET SDK 9.x（dotnet --version 應顯示 9.x）
 # 1) 編譯（產物：src\bin\Release\net9.0\roslyn-findrefs.exe，scripts 會自動找到它）
+#    此步可省略：scripts\start.cmd 啟動時偵測到執行檔缺失/不完整會自動編譯（需 .NET SDK）
 cd src
 dotnet build -c Release
 cd ..
@@ -94,7 +95,7 @@ README.md
 ## 快速開始（啟動腳本，都在 `scripts/`）
 | 腳本 | 作用 |
 |---|---|
-| `start.cmd` / `start.ps1` | 依 config 在**新視窗**啟動常駐 server，顯示建模進度；ready 才返回 |
+| `start.cmd` / `start.ps1` | 依 config 在**新視窗**啟動常駐 server，顯示建模進度；ready 才返回。執行檔缺失/不完整時**自動先編譯**；每次啟動逐步記錄於 `logs/start-*.log`（失敗時最後一行即出錯步驟）；`start.cmd` 失敗會 `pause` 保留視窗 |
 | `stop.cmd` / `stop.ps1` | 依 config 的 port 停掉 server |
 | `find.cmd` / `find.ps1` | 查詢符號引用，輸出 `file:line:col [assembly]` |
 | `sync.cmd` / `sync.ps1` | 一鍵重載所有磁碟上有異動的已索引 .cs（等同 `GET /sync`） |
@@ -110,6 +111,7 @@ scripts\stop.cmd                     # 停止（port 來自 config，必定對�
 ## build / 執行檔
 ```
 src/bin/Release/net9.0/roslyn-findrefs.exe        # 可獨立呼叫
+# 首次使用/產物缺失：scripts\start.cmd 會偵測 exe 與 runtimeconfig.json，缺了自動先編譯再啟動
 # 改了 src/*.cs 後，最省事：一鍵 停止→編譯→重啟
 scripts\rebuild.cmd
 # 或手動重建（需先停 server，否則 exe 被鎖）：
