@@ -1,17 +1,21 @@
 <#
   一鍵刷新：掃描全部已索引 .cs 的 mtime，重載所有異動檔（不必知道改了哪些檔）。
   等同 curl http://127.0.0.1:<port>/sync。需 server 執行中（先 .\start.ps1）。
-  用法:  .\sync.ps1            # port 讀 ..\config.json
+  用法:  .\sync.ps1            # port 讀 ..\config.json 的 default entry
+         .\sync.ps1 -Name clean
          .\sync.ps1 -Raw       # 直接吐 JSON（給程式解析）
          .\sync.ps1 -Port 8200
 #>
 param(
     [int]$Port = 0,
+    [string]$Name = "",
     [switch]$Raw
 )
 $ToolRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "_common.ps1")
-if ($Port -le 0) { $Port = [int]$Cfg.port }
+try { $sv = Resolve-RoslynServer $Name $Port }
+catch { Write-Host $_.Exception.Message -ForegroundColor Red; exit 1 }
+if ($Port -le 0) { $Port = [int]$sv.port }   # -Port 明示時覆寫 entry 的 port
 
 try { $r = Invoke-RestMethod "http://127.0.0.1:$Port/sync" -TimeoutSec 300 }
 catch {

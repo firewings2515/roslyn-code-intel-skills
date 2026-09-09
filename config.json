@@ -1,5 +1,7 @@
 {
-  "port": 8123,
-  "root": "E:\\Your\\UnityOrC#\\Project\\Path",
-  "csproj": ""
+  "default": "trunk",
+  "servers": [
+    {"name": "trunk", "port": 8123, "root": "E:\\Your\\UnityOrC#\\Project\\Path", "csproj": ""},
+    {"name": "clean", "port": 8124, "root": "E:\\Another\\Project\\Path", "csproj": ""}
+  ]
 }

@@ -18,7 +18,7 @@ cd src
 dotnet build -c Release
 cd ..
 
-# 2) 設定要分析的專案：編輯 config.json，root 填 Unity 專案根目錄
+# 2) 設定要分析的專案：編輯 config.json，servers 各筆的 root 填 Unity 專案根目錄
 #    （該專案需已由 Unity 產生 *.csproj 且編譯過一次；csproj/root 擇一即可）
 
 # 3) 啟動常駐 server（開在新視窗顯示建模進度，印出 model READY 後即可查詢）
@@ -75,8 +75,8 @@ curl -s "http://127.0.0.1:8123/findrefs?symbol=PlayerSystem"
 ## 資料夾結構（此資料夾本身就是一個 skill 包）
 ```
 SKILL.md               # 使用說明（在根層，相對路徑）＝ 查詢/端點的唯一文件
-config.json            # 設定的唯一來源：port / root / csproj
-scripts/               # start.cmd  stop.cmd  find.cmd  sync.cmd  rebuild.cmd  (+ 對應 .ps1、_common.ps1)
+config.json            # 設定的唯一來源：servers[] 各筆 name / port / root / csproj + default
+scripts/               # start.cmd  startone.cmd  stop.cmd  find.cmd  sync.cmd  rebuild.cmd  (+ 對應 .ps1、_common.ps1)
 src/                   # 原始碼 (Program.cs, roslyn-findrefs.csproj)；build 產物在 src/bin/Release/net9.0/
 README.md
 ```
@@ -86,24 +86,38 @@ README.md
 
 ## config.json（設定集中管理）
 ```json
-{ "port": 8123, "root": "E:\\Path\\To\\YourUnityProject", "csproj": "" }
+{
+  "default": "trunk",
+  "servers": [
+    { "name": "trunk", "port": 8123, "root": "E:\\Path\\To\\YourUnityProject", "csproj": "" },
+    { "name": "clean", "port": 8124, "root": "E:\\Path\\To\\AnotherProject",   "csproj": "" }
+  ]
+}
 ```
-- `start` / `stop` / `find` 三個腳本**都讀這個檔**，所以 port 一定對齊——不會發生 start 用一個 port、stop 用另一個而關不掉。
+- `servers` 每筆是一組 server（一組設定 / 一個 port）；`default` 指名不帶參數時的那一組，缺省取第一筆。
+- 所有腳本**都讀這個檔**，所以 port 一定對齊——不會發生 start 用一個 port、stop 用另一個而關不掉。
 - `root` 有值 → 跨組件模式；改填 `csproj`（且 `root` 留空）→ 單組件模式。
+- `-Name <名稱>` 指定某一組；`start` / `stop` / `rebuild` 另有 `-All` 對每一組各做一次。
+- 舊的扁平格式 `{ "port": …, "root": …, "csproj": … }` 仍可讀，視為單一組、名稱為 `default`。
 - 腳本參數（`-Port` / `-Root` / `-Csproj`）僅供臨時覆寫，平常不用帶。
 
 ## 快速開始（啟動腳本，都在 `scripts/`）
-| 腳本 | 作用 |
-|---|---|
-| `start.cmd` / `start.ps1` | 依 config 在**新視窗**啟動常駐 server，顯示建模進度；ready 才返回。執行檔缺失/不完整時**自動先編譯**；每次啟動逐步記錄於 `logs/start-*.log`（失敗時最後一行即出錯步驟）；`start.cmd` 失敗會 `pause` 保留視窗 |
-| `stop.cmd` / `stop.ps1` | 依 config 的 port 停掉 server |
-| `find.cmd` / `find.ps1` | 查詢符號引用，輸出 `file:line:col [assembly]` |
-| `sync.cmd` / `sync.ps1` | 一鍵重載所有磁碟上有異動的已索引 .cs（等同 `GET /sync`） |
-| `rebuild.cmd` / `rebuild.ps1` | 改了 `src/*.cs` 後一鍵：**停止 → 編譯 → 重啟**（編譯失敗則不重啟） |
+| 腳本 | 選組參數 | 作用 |
+|---|---|---|
+| `start.cmd` / `start.ps1` | `-Name` `-All` `-One` | 不帶參數＝啟動 config servers **全部**（等同 `-All`；已在監聽的跳過），在**新視窗**顯示建模進度。執行檔缺失/不完整時**自動先編譯**；每次啟動逐步記錄於 `logs/start-*.log`（失敗時最後一行即出錯步驟）；`start.cmd` 失敗會 `pause` 保留視窗 |
+| `startone.cmd` | `-Name` | 只啟動 **default entry**（可配 `-Name` 指定別組），等同 `start.ps1 -One`；其餘行為同 `start.cmd` |
+| `stop.cmd` / `stop.ps1` | `-Name` `-All` | 依 config 的 port 停掉 server |
+| `find.cmd` / `find.ps1` | `-Name` | 查詢符號引用，輸出 `file:line:col [assembly]` |
+| `sync.cmd` / `sync.ps1` | `-Name` | 一鍵重載所有磁碟上有異動的已索引 .cs（等同 `GET /sync`） |
+| `rebuild.cmd` / `rebuild.ps1` | `-Name` `-All` | 改了 `src/*.cs` 後一鍵：**停止 → 編譯 → 重啟**（編譯失敗則不重啟）。不帶參數時只處理目前實際在監聽的那幾組 |
 
 ```powershell
-scripts\start.cmd                    # 啟動（首次建模約 1–2 分鐘）
+scripts\start.cmd                    # 啟動全部 servers（每組各開一個新視窗，已在監聽的跳過；首次建模約 1–2 分鐘）
+scripts\startone.cmd                 # 只啟動 default 那組
+scripts\start.cmd -Name clean        # 啟動指定的一組
+scripts\start.cmd -All               # 每組各開一個新視窗（同不帶參數）
 scripts\find.cmd PlayerSystem        # 查詢（其餘查詢端點見 SKILL.md）
+scripts\find.cmd PlayerSystem -Name clean
 scripts\stop.cmd                     # 停止（port 來自 config，必定對齊）
 ```
 > server 是**手動啟動**的常駐 process（不設開機自動啟動），開在**自己的視窗**顯示 log。要停：關閉視窗或 `scripts\stop.cmd`。
@@ -118,7 +132,7 @@ scripts\rebuild.cmd
 cd src ; dotnet build -c Release
 ```
 > 編譯本身 ~1 秒；慢的是重啟後重建 Roslyn 模型(暖 ~10s、冷 ~130s)。改 `config.json` 只需重啟不需編譯;改被分析的 Unity 原始碼用 `/sync`(自動偵測所有 mtime 異動檔並重載,~0.3s)、`/reload`、`/rescan` 熱更新即可。
-server 也可手動下參數啟動（一般用腳本即可）：`roslyn-findrefs.exe serve --root <dir> --port <n>` 或 `--csproj <path>`。省略的參數會自動讀 `config.json`（從 exe 位置往上層找，即 skill 根目錄）；**程式內沒有任何寫死的專案路徑**——參數與 config 都沒給時 serve 會直接報錯退出。
+server 也可手動下參數啟動（一般用腳本即可）：`roslyn-findrefs.exe serve --root <dir> --port <n>` 或 `--csproj <path>`。exe 只認扁平格式的 `config.json`，用 `servers` 清單時參數一律由腳本明示帶入；**程式內沒有任何寫死的專案路徑**——參數與 config 都沒給時 serve 會直接報錯退出。
 
 ## 效能實測（一個 102 專案 / 1.2 萬檔的實際 Unity 專案）
 | 階段 | 耗時 |
@@ -137,7 +151,7 @@ scripts\stop.cmd          # 依 config 的 port 關閉（推薦）
 或手動：關閉 server 視窗；或 `netstat -ano | findstr 127.0.0.1:8123` 找 PID 後 `taskkill /PID <pid> /F`。
 
 ## 已知限制
-- 一個 server process 綁一組設定 / 一個 port。要同時跑單組件+跨組件可開兩個 port。
+- 一個 server process 綁一組設定 / 一個 port。要同時跑多組（多專案，或單組件+跨組件）就在 `config.json` 的 `servers` 各列一筆，用 `scripts\start.cmd -All` 一次各開一個視窗，查詢時以 `-Name` 選組。
 - 只認 `<Compile>` 列到、且檔案存在的原始碼；純預編譯 DLL 插件是以 metadata 參考納入（可被引用但無法在其中找引用）。
 - csproj 是 Unity 產生的投影，偶爾略舊（指到已刪檔會自動略過）。
 - 跨組件「共用原始碼」去重等行為細節見 `SKILL.md` 的 Gotchas。

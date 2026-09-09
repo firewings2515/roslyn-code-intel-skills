@@ -5,10 +5,11 @@ description: Precise semantic C# code intelligence for Unity projects via a loca
 
 # roslyn-code-intel — semantic C# code intelligence
 
-A resident Roslyn language server exposes C# code-intelligence over HTTP on the local port set in
-`config.json` (default **8123**). It loads the whole solution (every Unity-generated csproj of the
-configured project) as a semantic model, so queries are **precise and cross-assembly** — far better
-than text search for C#.
+A resident Roslyn language server exposes C# code-intelligence over HTTP on a local port taken from
+`config.json`, which holds one entry per project under `servers` (the `default` entry is used unless
+you name another; port **8123** out of the box). It loads the whole solution (every Unity-generated
+csproj of that entry's project) as a semantic model, so queries are **precise and cross-assembly**
+— far better than text search for C#.
 
 ## Common mistakes / 常見誤用 (read before querying)
 1. **`symbol=` takes a simple name only** (e.g. `TryLoadGame`). A dotted full name (`LobbyManager.TryLoadGame`) or one with a namespace returns `no symbol found` → use `/symbols?query=` fuzzy search to locate it first.
@@ -19,12 +20,14 @@ than text search for C#.
 ## Layout (this skill folder; all paths below are relative to it)
 ```
 SKILL.md               # this file (skill root)
-config.json            # port / root / csproj  ← single source of truth
+config.json            # servers[] of { name, port, root, csproj } + default  ← single source of truth
 scripts/               # start.cmd  stop.cmd  rebuild.cmd  find.cmd  sync.cmd  (+ .ps1)
 src/                   # source; build output at src/bin/Release/net9.0/roslyn-findrefs.exe
 README.md
 ```
 Commands below are relative to this folder. The project root and port come from `config.json`; don't hardcode them.
+Every script takes `-Name <entry>` to pick one entry, and `start`/`stop`/`rebuild` also take `-All` for every entry.
+The older flat `{ port, root, csproj }` config is still read — as a single entry named `default`.
 
 ## When to use
 - Where a type/method/field is **used** (`/findrefs`) — beats grep (no hits from comments/strings/same-named symbols).
@@ -39,12 +42,15 @@ Commands below are relative to this folder. The project root and port come from 
 
 ## Step 0 — ensure the server is running
 ```bash
-curl -s "http://127.0.0.1:8123/health"          # port = config.json
+curl -s "http://127.0.0.1:8123/health"          # port = the config.json `servers` entry you want
 ```
-- `{"ready":true,...}` → proceed.
+- `{"ready":true,...}` → proceed; the reply's `scope` says which project that server holds.
 - Refused or `"ready":false` → start it (cold build ~1–2 min, then instant); run from the tool folder:
 ```bash
-scripts/start.cmd
+scripts/start.cmd                  # all config servers (ones already listening are skipped)
+scripts/start.cmd -Name clean      # one named entry
+scripts/start.cmd -All             # every entry (ones already listening are skipped)
+scripts/startone.cmd                # only the default entry (add -Name to pick another)
 ```
 Missing/incomplete build output (no exe or no `roslyn-findrefs.runtimeconfig.json`) is handled automatically — start runs `dotnet build -c Release` first (needs .NET SDK). Every start writes a step log to `logs/start-*.log`; on failure the last line names the failing step.
 If you shouldn't launch long-running processes, ask the user to run `scripts/start.cmd`.
