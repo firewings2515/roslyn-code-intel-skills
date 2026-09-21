@@ -36,6 +36,7 @@ using Microsoft.CodeAnalysis.Text;
 //   /derived         ?symbol=NAME
 //   /callers         ?symbol=NAME
 //   /hierarchy       ?symbol=NAME            (base chain + derived)
+//   /impact          ?symbol=NAME [&depth=1..3] [&direction=in|out|both]   (class-level blast radius, BFS)
 //   /reload          ?file=PATH              (re-read one edited file from disk)
 //   /sync                                    (reload every indexed file whose mtime changed; no args)
 //   /rescan                                  (full rebuild: new files / project changes)
@@ -68,7 +69,7 @@ class Program
                 if (string.IsNullOrWhiteSpace(symbol)) { Console.Error.WriteLine("usage: find [--port N] <Symbol>"); return 2; }
                 return await Client.QueryAsync(port, symbol);
             default:
-                Console.WriteLine("usage:\n  serve --root <dir> [--port 8123]     (cross-assembly)\n  serve --csproj <path> [--port 8123]  (single assembly)\n  find [--port 8123] <Symbol>\n  endpoints: /findrefs /definition /hover /outline /symbols /implementations /overrides /derived /callers /hierarchy /reload /sync /rescan /health");
+                Console.WriteLine("usage:\n  serve --root <dir> [--port 8123]     (cross-assembly)\n  serve --csproj <path> [--port 8123]  (single assembly)\n  find [--port 8123] <Symbol>\n  endpoints: /findrefs /definition /hover /outline /symbols /implementations /overrides /derived /callers /hierarchy /impact /reload /sync /rescan /health");
                 return 0;
         }
     }
@@ -351,6 +352,7 @@ static class Server
             case "/derived": return (200, await RelatedSymbols(sol, query, "derived"));
             case "/callers": return (200, await Callers(sol, query));
             case "/hierarchy": return (200, await Hierarchy(sol, query));
+            case "/impact": return (200, await Impact(sol, query));
             default: return (404, JsonSerializer.Serialize(new { error = "unknown path", path }));
         }
     }
@@ -463,44 +465,49 @@ static class Server
         }, Json);
     }
 
+    // A logical declaration = one source file:line. Linked copies across assemblies share it.
+    // Genuinely different types that merely share a name have DIFFERENT keys.
+    static string DeclKey(ISymbol s)
+    {
+        var l = s.Locations.FirstOrDefault(x => x.IsInSource);
+        if (l == null) return s.ToDisplayString();
+        var sp = l.GetLineSpan();
+        return $"{l.SourceTree?.FilePath?.ToLowerInvariant()}|{sp.StartLinePosition.Line}";
+    }
+
+    // non-null only when a bare name hits 2+ distinct types — never silently merge them
+    static string? AmbiguousTypes(List<ISymbol> types, string symbol)
+    {
+        var groups = types.GroupBy(DeclKey).ToList();
+        if (groups.Count <= 1) return null;
+        var matches = groups.Select(g =>
+        {
+            var s = g.First(); var loc = s.Locations.FirstOrDefault(x => x.IsInSource);
+            int ln = 0; string? fp = null;
+            if (loc != null) { var sp = loc.GetLineSpan(); ln = sp.StartLinePosition.Line + 1; fp = loc.SourceTree?.FilePath; }
+            return new { type = s.ToDisplayString(), assemblies = g.Select(x => x.ContainingAssembly?.Name).Distinct(), file = fp, line = ln };
+        }).ToList();
+        return JsonSerializer.Serialize(new
+        {
+            symbol,
+            ambiguous = true,
+            message = "multiple distinct types share this name; re-query with a fully-qualified name (e.g. Namespace.Type) or a cursor position (file+line+col)",
+            matches
+        }, Json);
+    }
+
     static async Task<string> FindRefs(Solution sol, string query)
     {
         var sw = Stopwatch.StartNew();
         var decls = await ResolveTargets(sol, query);
         if (decls.Count == 0) return JsonSerializer.Serialize(new { count = 0, message = "no symbol found" });
 
-        // A logical declaration = one source file:line. Linked copies across assemblies share it.
-        // Genuinely different types that merely share a name have DIFFERENT keys.
-        static string DeclKey(ISymbol s)
-        {
-            var l = s.Locations.FirstOrDefault(x => x.IsInSource);
-            if (l == null) return s.ToDisplayString();
-            var sp = l.GetLineSpan();
-            return $"{l.SourceTree?.FilePath?.ToLowerInvariant()}|{sp.StartLinePosition.Line}";
-        }
-
         var types = decls.Where(s => s.Kind == SymbolKind.NamedType).ToList();
         List<ISymbol> targets;
         if (types.Count > 0)
         {
-            var groups = types.GroupBy(DeclKey).ToList();
-            if (groups.Count > 1)   // name collision across distinct types → don't silently merge
-            {
-                var matches = groups.Select(g =>
-                {
-                    var s = g.First(); var loc = s.Locations.FirstOrDefault(x => x.IsInSource);
-                    int ln = 0; string? fp = null;
-                    if (loc != null) { var sp = loc.GetLineSpan(); ln = sp.StartLinePosition.Line + 1; fp = loc.SourceTree?.FilePath; }
-                    return new { type = s.ToDisplayString(), assemblies = g.Select(x => x.ContainingAssembly?.Name).Distinct(), file = fp, line = ln };
-                }).ToList();
-                return JsonSerializer.Serialize(new
-                {
-                    symbol = ParseQuery(query, "symbol"),
-                    ambiguous = true,
-                    message = "multiple distinct types share this name; re-query with a fully-qualified name (e.g. Namespace.Type) or a cursor position (file+line+col)",
-                    matches
-                }, Json);
-            }
+            var amb = AmbiguousTypes(types, ParseQuery(query, "symbol"));
+            if (amb != null) return amb;
             targets = types;   // all linked copies of the SAME type
         }
         else targets = decls.Take(16).ToList();   // members (e.g. method + overloads): merge
@@ -670,6 +677,180 @@ static class Server
             baseChain = bases,
             interfaces = nt.AllInterfaces.Select(i => i.ToDisplayString(Fmt)).ToList(),
             derived = derived.Select(SymJson).ToList()
+        }, Json);
+    }
+
+    // ===== /impact: class-level blast radius =====
+    // Edge A→X = some member or declaration of named type A references X or any member X declares.
+    // A reference is attributed to the INNERMOST named type enclosing it (a nested type is its own node).
+    const int ImpactMaxDepth = 3;
+    const int ImpactMaxClasses = 200;
+
+    static string TypeKey(INamedTypeSymbol t) => t.OriginalDefinition.ToDisplayString();
+    static string RelPath(string? full)
+    {
+        if (string.IsNullOrEmpty(full)) return "";
+        try { var r = Path.GetRelativePath(BaseDir(), full); return (r.StartsWith("..") ? full : r).Replace('\\', '/'); }
+        catch { return full; }
+    }
+    static object ClassJson(INamedTypeSymbol t) => new
+    {
+        name = t.ToDisplayString(Fmt),
+        full = t.ToDisplayString(),
+        file = RelPath(t.Locations.FirstOrDefault(l => l.IsInSource)?.SourceTree?.FilePath)
+    };
+    static INamedTypeSymbol? OwningType(ISymbol? s)
+    {
+        var t = (s as INamedTypeSymbol ?? s?.ContainingType)?.OriginalDefinition;
+        return t != null && t.TypeKind != TypeKind.Error && !t.IsImplicitlyDeclared
+               && t.Locations.Any(l => l.IsInSource) ? t : null;
+    }
+    // accessors and compiler-added members are reached through their property/event/type instead
+    static bool Probeable(ISymbol m) =>
+        !m.IsImplicitlyDeclared && m.Kind != SymbolKind.NamedType && m.Locations.Any(l => l.IsInSource)
+        && (m as IMethodSymbol)?.MethodKind is not (MethodKind.PropertyGet or MethodKind.PropertySet
+            or MethodKind.EventAdd or MethodKind.EventRemove);
+
+    // one physical .cs can compile into several assemblies; a usage binds to the copy of ITS assembly,
+    // so every copy has to be probed or cross-assembly references go missing (same rule as /findrefs)
+    static async Task<List<INamedTypeSymbol>> TypeCopies(Solution sol, INamedTypeSymbol t)
+    {
+        var copies = new List<INamedTypeSymbol>(); var seen = new HashSet<string>();
+        foreach (var loc in t.Locations.Where(l => l.IsInSource))
+        {
+            var fp = loc.SourceTree?.FilePath;
+            if (fp == null) continue;
+            foreach (var id in sol.GetDocumentIdsWithFilePath(fp))
+            {
+                var doc = sol.GetDocument(id);
+                if (doc == null) continue;
+                var root = await doc.GetSyntaxRootAsync();
+                var model = await doc.GetSemanticModelAsync();
+                if (root!.FindNode(loc.SourceSpan) is var node && node != null
+                    && model!.GetDeclaredSymbol(node) is INamedTypeSymbol c
+                    && seen.Add(c.ContainingAssembly?.Name + "|" + c.ToDisplayString()))
+                    copies.Add(c);
+            }
+        }
+        if (copies.Count == 0) copies.Add(t);
+        return copies;
+    }
+
+    static async Task<INamedTypeSymbol?> ReferenceOwner(Document doc, TextSpan span, CancellationToken ct)
+    {
+        var root = await doc.GetSyntaxRootAsync(ct);
+        for (var n = root!.FindNode(span); n != null; n = n.Parent)
+            if (n is Microsoft.CodeAnalysis.CSharp.Syntax.BaseTypeDeclarationSyntax
+                  or Microsoft.CodeAnalysis.CSharp.Syntax.DelegateDeclarationSyntax)
+            {
+                var model = await doc.GetSemanticModelAsync(ct);
+                return OwningType(model!.GetDeclaredSymbol(n));
+            }
+        return null;
+    }
+
+    static async Task Dependents(Solution sol, List<INamedTypeSymbol> copies, ConcurrentDictionary<string, INamedTypeSymbol> acc)
+    {
+        var probes = new List<ISymbol>();
+        foreach (var c in copies) { probes.Add(c); probes.AddRange(c.GetMembers().Where(Probeable)); }
+        await Parallel.ForEachAsync(probes, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
+            async (p, ct) =>
+            {
+                foreach (var rf in await SymbolFinder.FindReferencesAsync(p, sol, ct))
+                    foreach (var loc in rf.Locations)
+                    {
+                        var owner = await ReferenceOwner(loc.Document, loc.Location.SourceSpan, ct);
+                        if (owner != null) acc.TryAdd(TypeKey(owner), owner);
+                    }
+            });
+    }
+
+    static async Task Dependencies(Solution sol, List<INamedTypeSymbol> copies, ConcurrentDictionary<string, INamedTypeSymbol> acc)
+    {
+        foreach (var c in copies)
+            foreach (var sr in c.DeclaringSyntaxReferences)
+            {
+                var doc = sol.GetDocument(sr.SyntaxTree);
+                if (doc == null) continue;
+                var model = await doc.GetSemanticModelAsync();
+                var node = await sr.GetSyntaxAsync();
+                // a nested type's own body belongs to that nested type, not to this one
+                foreach (var n in node.DescendantNodes(d => d == node
+                            || d is not (Microsoft.CodeAnalysis.CSharp.Syntax.BaseTypeDeclarationSyntax
+                                      or Microsoft.CodeAnalysis.CSharp.Syntax.DelegateDeclarationSyntax))
+                        .OfType<Microsoft.CodeAnalysis.CSharp.Syntax.SimpleNameSyntax>())
+                {
+                    var si = model!.GetSymbolInfo(n);
+                    var owner = OwningType(si.Symbol ?? si.CandidateSymbols.FirstOrDefault());
+                    if (owner != null) acc.TryAdd(TypeKey(owner), owner);
+                }
+            }
+    }
+
+    static async Task<List<INamedTypeSymbol>> Neighbors(Solution sol, INamedTypeSymbol t, string direction)
+    {
+        var copies = await TypeCopies(sol, t);
+        var acc = new ConcurrentDictionary<string, INamedTypeSymbol>();
+        if (direction != "out") await Dependents(sol, copies, acc);
+        if (direction != "in") await Dependencies(sol, copies, acc);
+        acc.TryRemove(TypeKey(t), out _);
+        return acc.Values.ToList();
+    }
+
+    static async Task<string> Impact(Solution sol, string query)
+    {
+        var sw = Stopwatch.StartNew();
+        string direction = ParseQuery(query, "direction");
+        if (string.IsNullOrWhiteSpace(direction)) direction = "in";
+        if (direction is not ("in" or "out" or "both"))
+            return JsonSerializer.Serialize(new { error = "direction must be in | out | both", direction });
+        int depth = int.TryParse(ParseQuery(query, "depth"), out var d0) ? Math.Clamp(d0, 1, ImpactMaxDepth) : 1;
+
+        var decls = await ResolveTargets(sol, query);
+        if (decls.Count == 0) return JsonSerializer.Serialize(new { count = 0, message = "no symbol found" });
+        var types = decls.Where(s => s.Kind == SymbolKind.NamedType).ToList();
+        var amb = AmbiguousTypes(types, ParseQuery(query, "symbol"));
+        if (amb != null) return amb;
+        // a member target is rolled up to the type that declares it
+        var target = (types.FirstOrDefault() as INamedTypeSymbol ?? decls[0].ContainingType)?.OriginalDefinition;
+        if (target == null) return JsonSerializer.Serialize(new { count = 0, message = "no named type found" });
+
+        var seen = new HashSet<string> { TypeKey(target) };
+        var frontier = new List<INamedTypeSymbol> { target };
+        var levels = new List<object>();
+        int total = 0, emitted = 0; bool truncated = false;
+        for (int d = 1; d <= depth; d++)
+        {
+            var next = new Dictionary<string, INamedTypeSymbol>();
+            foreach (var t in frontier)
+                foreach (var n in await Neighbors(sol, t, direction))
+                {
+                    var k = TypeKey(n);
+                    if (!seen.Contains(k)) next.TryAdd(k, n);
+                }
+            var found = next.Values.OrderBy(x => x.ToDisplayString(), StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var k in next.Keys) seen.Add(k);
+            total += found.Count;
+            var shown = found.Take(Math.Max(0, ImpactMaxClasses - emitted)).ToList();
+            emitted += shown.Count;
+            if (shown.Count < found.Count) truncated = true;
+            levels.Add(new { depth = d, count = found.Count, classes = shown.Select(ClassJson).ToList() });
+            if (found.Count == 0) break;
+            // deeper levels would have to expand classes that were cut, so stop instead of reporting a wrong count
+            if (emitted >= ImpactMaxClasses) { if (d < depth) truncated = true; break; }
+            frontier = found;
+        }
+        return JsonSerializer.Serialize(new
+        {
+            symbol = ParseQuery(query, "symbol"),
+            resolved = target.ToDisplayString(),
+            direction,
+            depth,
+            totalClasses = total,
+            truncated,
+            note = truncated ? $"capped at {ImpactMaxClasses} classes; per-level count is the true total" : null,
+            levels,
+            ms = sw.ElapsedMilliseconds
         }, Json);
     }
 

@@ -1,6 +1,6 @@
 ---
 name: roslyn-code-intel
-description: Precise semantic C# code intelligence for Unity projects via a local Roslyn HTTP server — find references, go-to-definition, hover/type info, callers, implementations/overrides, derived classes, type hierarchy, file outline, and workspace symbol search. Use this INSTEAD OF grep/ripgrep/text-search whenever you need accurate C# navigation on .cs code in the configured project: it is cross-assembly and semantically correct (distinguishes overloads, same-named symbols, inherited members). After editing .cs files, hit /sync once (auto-reloads every changed file) so results stay fresh.
+description: Precise semantic C# code intelligence for Unity projects via a local Roslyn HTTP server — find references, go-to-definition, hover/type info, callers, implementations/overrides, derived classes, type hierarchy, class-level impact/blast radius, file outline, and workspace symbol search. Use this INSTEAD OF grep/ripgrep/text-search whenever you need accurate C# navigation on .cs code in the configured project: it is cross-assembly and semantically correct (distinguishes overloads, same-named symbols, inherited members). After editing .cs files, hit /sync once (auto-reloads every changed file) so results stay fresh.
 ---
 
 # roslyn-code-intel — semantic C# code intelligence
@@ -33,6 +33,7 @@ The older flat `{ port, root, csproj }` config is still read — as a single ent
 - Where a type/method/field is **used** (`/findrefs`) — beats grep (no hits from comments/strings/same-named symbols).
 - **Go-to-definition** (`/definition`), **type info / docs** (`/hover`).
 - **Who calls this** (`/callers`); **who implements/overrides/derives** (`/implementations` `/overrides` `/derived` `/hierarchy`).
+- **What breaks if I change this class** (`/impact`) — the whole BFS runs server-side, so you get the blast radius in one call instead of walking `/findrefs` hop by hop.
 - **Outline** a file (`/outline`) or **search** a symbol by substring (`/symbols`) instead of reading whole files.
 
 ## When NOT to use
@@ -88,6 +89,7 @@ Most take `?symbol=NAME` (bare `Foo`, `Namespace.Type`, or `Type.Member`).
 | `/derived` | symbol | subclasses of a type |
 | `/callers` | symbol | methods that call this method (deduped) |
 | `/hierarchy` | symbol | base chain + interfaces + derived classes |
+| `/impact` | symbol [&depth] [&direction] | class-level blast radius, BFS by level (see below) |
 | `/reload` | file | refresh one edited file |
 | `/sync` | — | reload ALL files changed on disk since load (mtime scan); flags `needRescan` |
 | `/rescan` | — | full rebuild |
@@ -103,9 +105,31 @@ curl -s "http://127.0.0.1:8123/derived?symbol=BaseSystem"
 curl -s "http://127.0.0.1:8123/symbols?query=WeaponMana&limit=20"
 curl -s "http://127.0.0.1:8123/outline?file=Assets/Scripts/BetLevelsInfo.cs"
 curl -s "http://127.0.0.1:8123/definition?file=Assets/Scripts/BetLevelsInfo.cs&line=9&col=35"   # cursor
+curl -s "http://127.0.0.1:8123/impact?symbol=BetInfo&depth=1&direction=in"
 # thin client (== /findrefs):
 scripts/find.cmd PlayerSystem
 ```
+
+### `/impact` — "what breaks if I change this class"
+Answers **class-level** blast radius: the BFS runs to completion inside the server, so one call replaces a chain of `/findrefs` hops.
+
+| Param | Default | Notes |
+|---|---|---|
+| `symbol` | — | a type (bare `Foo`, `Namespace.Type`, or a cursor `file`+`line`+`col`). A **member** target is rolled up to the type that declares it. Bare-name collisions return the same `ambiguous` payload as `/findrefs` → re-query with the FQN. |
+| `depth` | `1` | clamped to **1–3**. |
+| `direction` | `in` | `in` = who depends on the target (the blast radius), `out` = what the target depends on, `both` = the union. |
+
+- **Edge (A→X):** any member or declaration of named type `A` references `X` **or any member `X` declares**. So a class that never names the type but touches `x.SomeField` still shows up — that is the point, and it is why the result is a superset of `/findrefs` on the type alone.
+- **Attribution:** a reference is credited to the **innermost named type** enclosing it, so a nested type is its own node (`AW.ArcheryTable.ParseData`, not `AW.ArcheryTable`). Self-references are dropped and each pair of types is counted once.
+- **Guardrails:** hard cap of **200 classes** returned. `count` per level is always the **true** total even when the class list was cut; `truncated:true` says the listing was capped (and that deeper levels were not expanded). Output is deliberately thin — `{name, full, file}` only, no snippets and no per-reference locations; go to `/findrefs` for those.
+- **Cost:** depth 1 is ~50 ms–2 s. A high fan-in type at depth 2–3 can take a minute or more before the cap stops it (`ArkGame.BaseSystem` depth 2 ≈ 73 s) — start at depth 1 and widen only if you need to.
+- **Snapshot:** like every other endpoint it reads the current in-memory model and never syncs implicitly — **call `/sync` first** if you have edited `.cs` files.
+
+```bash
+curl -s "http://127.0.0.1:8123/sync"
+curl -s "http://127.0.0.1:8123/impact?symbol=BetLevelsInfo&depth=2&direction=in"
+```
+Returns `{symbol, resolved, direction, depth, totalClasses, truncated, note, levels:[{depth, count, classes:[{name, full, file}]}], ms}` — `file` is repo-relative.
 
 ## Reading the output (JSON)
 - `/findrefs` → `{symbol, kind, definedIn, count, files, ms, references:[{project, file, line, col}]}` — `file:line:col` clickable; `project` = owning assembly.

@@ -33,6 +33,7 @@ curl.exe -s "http://127.0.0.1:8123/health"     # {"ready":true,...} 即完成
 ## 功能總覽
 - **參照與導航**：`/findrefs`（所有語意引用，去重、跨組件）、`/definition`、`/hover`、`/callers`
 - **型別關係**：`/implementations`、`/overrides`、`/derived`、`/hierarchy`
+- **波及範圍**：`/impact`（改動某類別時 class-level 的波及面；BFS 在 server 內跑完，不用逐跳查 `/findrefs`）
 - **瀏覽與搜尋**：`/outline`（單檔結構）、`/symbols`（全解決方案模糊搜尋）
 - **模型維護**：`/sync`（一鍵重載所有磁碟異動檔，~0.3s）、`/reload`（單檔）、`/rescan`（全量重建）、`/health`
 - **語意精準**：分辨 overload、同名符號、繼承成員；依各 csproj 的 `DefineConstants` 解析 `#if` 區塊；比 grep/文字搜尋準確得多
@@ -57,6 +58,33 @@ curl -s "http://127.0.0.1:8123/findrefs?symbol=PlayerSystem"
   ]
 }
 ```
+
+`/impact` 的參數：`symbol`（型別；解析到成員會歸到其宣告型別，bare name 撞名同樣回 `ambiguous` 清單）、`depth`（預設 `1`，上限 `3`）、`direction`（預設 `in`＝誰依賴它，另有 `out`＝它依賴誰、`both`）。
+邊的定義是 class-level：某型別引用了目標型別**或目標宣告的任何成員**即算一條邊，歸屬到包含它的最內層 named type。結果**上限 200 個類別**，超過即截斷並回 `truncated:true`，但每層的 `count` 仍是真實總數。輸出刻意精簡（只有 `name`／`full`／`file`），要逐筆位置請改用 `/findrefs`。
+
+```bash
+curl -s "http://127.0.0.1:8123/impact?symbol=BetLevelsInfo&depth=2&direction=in"
+```
+```jsonc
+{
+  "symbol": "BetLevelsInfo",
+  "resolved": "BetLevelsInfo",
+  "direction": "in",
+  "depth": 2,
+  "totalClasses": 582,
+  "truncated": true,
+  "note": "capped at 200 classes; per-level count is the true total",
+  "levels": [
+    { "depth": 1, "count": 15,  "classes": [
+        { "name": "GameSystem", "full": "ArkGame.GameSystem", "file": "Assets/Scripts/GameSystem.cs" }
+        // …（節錄；本層 15 筆全列）
+    ] },
+    { "depth": 2, "count": 567, "classes": [ /* 只列 185 筆＝補到 200 上限為止 */ ] }
+  ],
+  "ms": 5820
+}
+```
+> 查詢作用於當下的記憶體模型、不會隱式 sync——改過 `.cs` 請先 `GET /sync`。高 fan-in 型別 depth 2–3 可能要數十秒（實測 `ArkGame.BaseSystem` depth=2 約 73s），建議從 depth 1 起步。
 
 ## 環境需求
 **建置階段（build，一次性 / 改碼後）**
